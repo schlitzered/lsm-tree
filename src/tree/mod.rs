@@ -265,7 +265,7 @@ impl AbstractTree for Tree {
         let config = self.tree_config();
         let mut versions = self.get_version_history_lock();
 
-        versions.upgrade_version(
+        let seqno = versions.upgrade_version(
             &config.path,
             |v| {
                 let mut copy = v.clone();
@@ -275,8 +275,14 @@ impl AbstractTree for Tree {
                 Ok(copy)
             },
             &config.seqno,
-            &config.visible_seqno,
-        )
+        )?;
+
+        drop(versions);
+
+        // NOTE: Like a write, `clear` is called with the publish lock held (if any)
+        config.visible_seqno.fetch_max(seqno + 1);
+
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -430,7 +436,6 @@ impl AbstractTree for Tree {
         Ok(Some((tables, None)))
     }
 
-    #[expect(clippy::significant_drop_tightening)]
     fn register_tables(
         &self,
         tables: &[Table],
@@ -446,7 +451,7 @@ impl AbstractTree for Tree {
         );
 
         #[expect(clippy::expect_used, reason = "lock is expected to not be poisoned")]
-        let mut _compaction_state = self.compaction_state.lock().expect("lock is poisoned");
+        let compaction_state = self.compaction_state.lock().expect("lock is poisoned");
         #[expect(clippy::expect_used, reason = "lock is expected to not be poisoned")]
         let mut version_lock = self.version_history.write().expect("lock is poisoned");
 
@@ -460,7 +465,7 @@ impl AbstractTree for Tree {
             return Ok(());
         }
 
-        version_lock.upgrade_version(
+        let seqno = version_lock.upgrade_version(
             &self.config.path,
             |current| {
                 let mut copy = current.clone();
@@ -479,12 +484,16 @@ impl AbstractTree for Tree {
                 Ok(copy)
             },
             &self.config.seqno,
-            &self.config.visible_seqno,
         )?;
 
         if let Err(e) = version_lock.maintenance(&self.config.path, gc_watermark) {
             log::warn!("Version GC failed: {e:?}");
         }
+
+        drop(version_lock);
+        drop(compaction_state);
+
+        self.publish_version(seqno);
 
         Ok(())
     }
@@ -857,11 +866,49 @@ impl Tree {
         let mut opts = Options::from_tree(self, strategy);
         opts.mvcc_gc_watermark = mvcc_gc_watermark;
 
-        do_compaction(&opts)?;
+        let seqno_before = self.latest_version_seqno();
+
+        let result = do_compaction(&opts);
+
+        // NOTE: Publish even if the compaction failed after installing a version
+        let seqno_after = self.latest_version_seqno();
+        if seqno_after != seqno_before {
+            self.publish_version(seqno_after);
+        }
+
+        result?;
 
         log::debug!("Compaction run over");
 
         Ok(())
+    }
+
+    fn latest_version_seqno(&self) -> SeqNo {
+        #[expect(clippy::expect_used, reason = "lock is expected to not be poisoned")]
+        self.version_history
+            .read()
+            .expect("lock is poisoned")
+            .latest_version()
+            .seqno
+    }
+
+    /// Makes the installed version with the given seqno visible to new snapshots.
+    ///
+    /// Takes the publish lock (if any), so a write batch that has allocated a lower seqno
+    /// is never made visible while it is still being applied.
+    ///
+    /// Must not be called while holding the version history or compaction state lock.
+    pub(crate) fn publish_version(&self, seqno: SeqNo) {
+        let visible_seqno = &self.config.visible_seqno;
+
+        // NOTE: Do not wait for the publish lock if there is nothing to publish
+        if visible_seqno.get() > seqno {
+            return;
+        }
+
+        crate::seqno::with_publish_lock(self.config.publish_lock.as_deref(), || {
+            visible_seqno.fetch_max(seqno + 1);
+        });
     }
 
     #[doc(hidden)]

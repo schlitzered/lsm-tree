@@ -6,6 +6,7 @@ use crate::{
     blob_tree::handle::BlobIndirection, file::BLOBS_FOLDER, table::Table,
     tree::ingest::Ingestion as TableIngestion, vlog::BlobFileWriter, SeqNo, UserKey, UserValue,
 };
+use std::sync::MutexGuard;
 
 /// Bulk ingestion for [`BlobTree`]
 ///
@@ -180,11 +181,25 @@ impl<'a> BlobIngestion<'a> {
         // entries could have mismatched sequence numbers.
         let flush_lock = index.get_flush_lock();
 
+        // See `Ingestion::finish` of the standard tree for why we hold the publish lock
+        crate::seqno::with_publish_lock(index.config.publish_lock.as_deref(), || {
+            self.finish_locked(&index, &flush_lock)
+        })
+    }
+
+    #[allow(clippy::significant_drop_tightening)]
+    fn finish_locked(
+        self,
+        index: &crate::Tree,
+        flush_lock: &MutexGuard<'_, ()>,
+    ) -> crate::Result<()> {
+        use crate::AbstractTree;
+
         // Flush any pending index memtable writes to ensure ingestion sees
         // a consistent snapshot of the index.
         // We call rotate + flush directly because we already hold the lock.
         index.rotate_memtable();
-        index.flush(&flush_lock, 0)?;
+        index.flush(flush_lock, 0)?;
 
         // Finalize the blob writer first, ensuring all large values are
         // written to blob files before we finalize the index tables that
@@ -199,7 +214,7 @@ impl<'a> BlobIngestion<'a> {
         // hold both the compaction state lock and version history lock to
         // safely modify the tree's version.
         #[expect(clippy::expect_used, reason = "lock is expected to not be poisoned")]
-        let mut _compaction_state = index.compaction_state.lock().expect("lock is poisoned");
+        let compaction_state = index.compaction_state.lock().expect("lock is poisoned");
         #[expect(clippy::expect_used, reason = "lock is expected to not be poisoned")]
         let mut version_lock = index.version_history.write().expect("lock is poisoned");
 
@@ -257,7 +272,6 @@ impl<'a> BlobIngestion<'a> {
                 Ok(copy)
             },
             global_seqno,
-            &self.tree.index.config.visible_seqno,
         )?;
 
         // Perform maintenance on the version history (e.g., clean up old versions).
@@ -265,6 +279,11 @@ impl<'a> BlobIngestion<'a> {
         if let Err(e) = version_lock.maintenance(&index.config.path, 0) {
             log::warn!("Version GC failed: {e:?}");
         }
+
+        drop(version_lock);
+        drop(compaction_state);
+
+        index.publish_version(global_seqno);
 
         Ok(())
     }

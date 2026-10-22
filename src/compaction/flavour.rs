@@ -309,7 +309,6 @@ impl CompactionFlavour for RelocatingCompaction {
                 Ok(copy)
             },
             &opts.global_seqno,
-            &opts.visible_seqno,
         )?;
 
         // NOTE: If the application were to crash >here< it's fine
@@ -439,7 +438,6 @@ impl CompactionFlavour for StandardCompaction {
                 Ok(copy)
             },
             &opts.global_seqno,
-            &opts.visible_seqno,
         )?;
 
         // NOTE: If the application were to crash >here< it's fine

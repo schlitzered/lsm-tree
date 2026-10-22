@@ -37,8 +37,6 @@ pub struct Options {
 
     pub global_seqno: SequenceNumberCounter,
 
-    pub visible_seqno: SequenceNumberCounter,
-
     pub table_id_generator: SequenceNumberCounter,
 
     pub blob_file_id_generator: SequenceNumberCounter,
@@ -68,7 +66,6 @@ impl Options {
     pub fn from_tree(tree: &crate::Tree, strategy: Arc<dyn CompactionStrategy>) -> Self {
         Self {
             global_seqno: tree.config.seqno.clone(),
-            visible_seqno: tree.config.visible_seqno.clone(),
             tree_id: tree.id,
             table_id_generator: tree.table_id_counter.clone(),
             blob_file_id_generator: tree.blob_file_id_counter.clone(),
@@ -235,7 +232,6 @@ fn move_tables(
             Ok(copy)
         },
         &opts.global_seqno,
-        &opts.visible_seqno,
     )?;
 
     if let Err(e) = version_history_lock.maintenance(&opts.config.path, opts.mvcc_gc_watermark) {
@@ -665,7 +661,6 @@ fn drop_tables(
             Ok(copy)
         },
         &opts.global_seqno,
-        &opts.visible_seqno,
     )?;
 
     if let Err(e) = version_history_lock.maintenance(&opts.config.path, opts.mvcc_gc_watermark) {

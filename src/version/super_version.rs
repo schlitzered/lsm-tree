@@ -110,14 +110,18 @@ impl SuperVersions {
     /// and returns a new version.
     ///
     /// The function takes care of persisting the version changes on disk.
+    ///
+    /// Returns the seqno of the new version. The caller makes the version visible
+    /// by publishing it, after releasing the version history lock (see `Tree::publish_version`).
     pub(crate) fn upgrade_version<F: FnOnce(&SuperVersion) -> crate::Result<SuperVersion>>(
         &mut self,
         tree_path: &Path,
         f: F,
         seqno: &SequenceNumberCounter,
-        visible_seqno: &SequenceNumberCounter,
-    ) -> crate::Result<()> {
-        self.upgrade_version_with_seqno(tree_path, f, seqno.next(), visible_seqno)
+    ) -> crate::Result<SeqNo> {
+        let seqno = seqno.next();
+        self.upgrade_version_with_seqno(tree_path, f, seqno)?;
+        Ok(seqno)
     }
 
     /// Like `upgrade_version`, but takes an already-allocated sequence number.
@@ -131,7 +135,6 @@ impl SuperVersions {
         tree_path: &Path,
         f: F,
         seqno: SeqNo,
-        visible_seqno: &SequenceNumberCounter,
     ) -> crate::Result<()> {
         let mut next_version = f(&self.latest_version())?;
         next_version.seqno = seqno;
@@ -139,8 +142,6 @@ impl SuperVersions {
 
         persist_version(tree_path, &next_version.version)?;
         self.append_version(next_version);
-
-        visible_seqno.fetch_max(seqno + 1);
 
         Ok(())
     }

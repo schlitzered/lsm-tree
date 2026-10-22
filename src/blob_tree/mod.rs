@@ -273,7 +273,7 @@ impl AbstractTree for BlobTree {
         let config = self.tree_config();
         let mut versions = self.get_version_history_lock();
 
-        versions.upgrade_version(
+        let seqno = versions.upgrade_version(
             &config.path,
             |v| {
                 let mut copy = v.clone();
@@ -284,8 +284,14 @@ impl AbstractTree for BlobTree {
                 Ok(copy)
             },
             &config.seqno,
-            &config.visible_seqno,
-        )
+        )?;
+
+        drop(versions);
+
+        // NOTE: Like a write, `clear` is called with the publish lock held (if any)
+        config.visible_seqno.fetch_max(seqno + 1);
+
+        Ok(())
     }
 
     fn major_compact(&self, target_size: u64, seqno_threshold: SeqNo) -> crate::Result<()> {

@@ -21,7 +21,7 @@ pub type PartitioningPolicy = PinningPolicy;
 
 use crate::{
     compaction::filter::Factory, path::absolute_path, version::DEFAULT_LEVEL_COUNT, AnyTree,
-    BlobTree, Cache, CompressionType, DescriptorTable, SequenceNumberCounter, Tree,
+    BlobTree, Cache, CompressionType, DescriptorTable, PublishLock, SequenceNumberCounter, Tree,
 };
 use std::{
     path::{Path, PathBuf},
@@ -238,6 +238,9 @@ pub struct Config {
     pub(crate) seqno: SequenceNumberCounter,
 
     pub(crate) visible_seqno: SequenceNumberCounter,
+
+    /// Lock that is held while publishing a new version into `visible_seqno`
+    pub(crate) publish_lock: Option<Arc<dyn PublishLock>>,
 }
 
 // TODO: remove default?
@@ -248,6 +251,7 @@ impl Default for Config {
             descriptor_table: Some(Arc::new(DescriptorTable::new(256))),
             seqno: SequenceNumberCounter::default(),
             visible_seqno: SequenceNumberCounter::default(),
+            publish_lock: None,
 
             cache: Arc::new(Cache::with_capacity_bytes(
                 /* 16 MiB */ 16 * 1_024 * 1_024,
@@ -464,6 +468,19 @@ impl Config {
     #[must_use]
     pub fn with_compaction_filter_factory(mut self, factory: Option<Arc<dyn Factory>>) -> Self {
         self.compaction_filter_factory = factory;
+        self
+    }
+
+    /// Sets the lock that writers hold from allocating a sequence number until
+    /// they have published it, for example a journal lock.
+    ///
+    /// The tree takes it when it makes a new version (flush, compaction, ingestion) visible,
+    /// so a write batch that is being applied at that time does not become partially visible.
+    ///
+    /// See [`PublishLock`] for the lock order.
+    #[must_use]
+    pub fn with_publish_lock(mut self, lock: Option<Arc<dyn PublishLock>>) -> Self {
+        self.publish_lock = lock;
         self
     }
 
